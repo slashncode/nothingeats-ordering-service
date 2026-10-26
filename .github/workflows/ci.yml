@@ -35,6 +35,8 @@ jobs:
 
   codeql:
     uses: slashncode/nothingeats-ci/.github/workflows/codeql.yml@main
+    with:
+      checkout-repos: nothingeats-delivery-service
     permissions:
       contents: read
       security-events: write
