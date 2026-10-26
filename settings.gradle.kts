@@ -35,6 +35,12 @@ val platformVersion = providers.gradleProperty("nothingeatsPlatformVersion").get
 
 if (platformDir.exists()) includeBuild(platformDir)
 
+// gRPC contracts of other services, from their sibling checkouts (CI clones them; record 032).
+listOf("nothingeats-delivery-service").forEach { repo ->
+    val dir = file("../$repo").canonicalFile
+    if (dir.exists()) includeBuild(dir)
+}
+
 dependencyResolutionManagement {
     repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
     repositories {

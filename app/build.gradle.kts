@@ -12,5 +12,7 @@ dependencies {
     implementation(project(":adapters"))
 
     testImplementation(libs.nothingeats.platform.testing)
+    // A fake delivery service in the flow test speaks the real contract.
+    testImplementation("io.github.slashncode.nothingeats.delivery:grpc-api")
     testImplementation(libs.konsist)
 }

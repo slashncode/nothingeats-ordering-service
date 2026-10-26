@@ -19,12 +19,15 @@ jobs:
       contents: write # dependency graph submission on main
     with:
       verify-image: true
+      checkout-repos: nothingeats-delivery-service # its gRPC contract (record 032)
 
   # Services push a signed image on main; the template itself only verifies that it builds.
   image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository != 'slashncode/nothingeats-kotlin-service-template'
     needs: kotlin
     uses: slashncode/nothingeats-ci/.github/workflows/kotlin-image.yml@main
+    with:
+      checkout-repos: nothingeats-delivery-service
     permissions:
       contents: read
       packages: write # push the image to GHCR
