@@ -40,6 +40,8 @@ import kotlinx.serialization.Serializable
 data class CartRestaurantResponse(
     val slug: String,
     val name: String,
+    val latitude: Double,
+    val longitude: Double,
     val deliveryMinutes: Int,
     val deliveryFeeCents: Long,
     val minimumOrderCents: Long,
@@ -233,6 +235,8 @@ class OrderingRoutes(
                     CartRestaurantResponse(
                         it.slug,
                         it.name,
+                        it.location.latitude,
+                        it.location.longitude,
                         it.deliveryMinutes,
                         it.deliveryFeeCents,
                         it.minimumOrderCents,
