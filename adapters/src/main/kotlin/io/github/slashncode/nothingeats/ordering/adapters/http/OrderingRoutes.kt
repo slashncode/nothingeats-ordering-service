@@ -1,5 +1,6 @@
 package io.github.slashncode.nothingeats.ordering.adapters.http
 
+import io.github.slashncode.nothingeats.ordering.application.ApplyCoupon
 import io.github.slashncode.nothingeats.ordering.application.ChangeCart
 import io.github.slashncode.nothingeats.ordering.application.CheckoutQuote
 import io.github.slashncode.nothingeats.ordering.application.ClearCart
@@ -8,6 +9,7 @@ import io.github.slashncode.nothingeats.ordering.application.GetOrder
 import io.github.slashncode.nothingeats.ordering.application.ListOrders
 import io.github.slashncode.nothingeats.ordering.application.PlaceOrder
 import io.github.slashncode.nothingeats.ordering.application.QuoteCheckout
+import io.github.slashncode.nothingeats.ordering.application.RemoveCoupon
 import io.github.slashncode.nothingeats.ordering.application.ViewCart
 import io.github.slashncode.nothingeats.ordering.domain.DropOff
 import io.github.slashncode.nothingeats.ordering.domain.InvalidOrder
@@ -48,6 +50,12 @@ data class CartRestaurantResponse(
 )
 
 @Serializable
+data class CartDealResponse(
+    val percentOff: Int,
+    val endsAt: String,
+)
+
+@Serializable
 data class CartLineResponse(
     val dishId: String,
     val name: String,
@@ -55,6 +63,26 @@ data class CartLineResponse(
     val quantity: Int,
     val totalCents: Long,
     val available: Boolean,
+    /** The menu price while a flash deal makes the dish cheaper. */
+    val regularUnitPriceCents: Long? = null,
+    val deal: CartDealResponse? = null,
+)
+
+@Serializable
+data class CartCouponResponse(
+    val code: String,
+    /** `PERCENT`, `AMOUNT`, `FREE_DELIVERY`, `FREE_DISH`; null when the coupon could not be priced. */
+    val kind: String?,
+    val value: Long,
+    val maxDiscountCents: Long?,
+    val discountCents: Long,
+    /** Why it does not apply (`COUPON_MINIMUM_NOT_REACHED`, `COUPON_UNAVAILABLE`, …); null when it does. */
+    val problem: String?,
+)
+
+@Serializable
+data class CouponRequest(
+    val code: String,
 )
 
 @Serializable
@@ -64,9 +92,11 @@ data class CartResponse(
     val itemCount: Int,
     val subtotalCents: Long,
     val deliveryFeeCents: Long,
+    val discountCents: Long,
     val totalCents: Long,
     val calories: Int,
-    /** `DISH_UNAVAILABLE`, `MINIMUM_NOT_REACHED`, `RESTAURANT_CLOSED` */
+    val coupon: CartCouponResponse?,
+    /** `DISH_UNAVAILABLE`, `MINIMUM_NOT_REACHED`, `RESTAURANT_CLOSED`, `COUPON_NOT_APPLICABLE` */
     val problems: List<String>,
     val orderable: Boolean,
 )
@@ -107,6 +137,7 @@ data class OrderLineResponse(
     val quantity: Int,
     val unitPriceCents: Long,
     val totalCents: Long,
+    val regularUnitPriceCents: Long? = null,
 )
 
 @Serializable
@@ -135,6 +166,8 @@ data class OrderResponse(
     val lines: List<OrderLineResponse>,
     val subtotalCents: Long,
     val deliveryFeeCents: Long,
+    val discountCents: Long,
+    val couponCode: String?,
     val totalCents: Long,
     val calories: Int,
     val dropOff: DropOffResponse,
@@ -155,6 +188,8 @@ class OrderingRoutes(
     private val viewCart: ViewCart,
     private val changeCart: ChangeCart,
     private val clearCart: ClearCart,
+    private val applyCoupon: ApplyCoupon,
+    private val removeCoupon: RemoveCoupon,
     private val quoteCheckout: QuoteCheckout,
     private val placeOrder: PlaceOrder,
     private val listOrders: ListOrders,
@@ -164,7 +199,7 @@ class OrderingRoutes(
     override fun Route.register() {
         route("/api/ordering/v1") {
             authenticated {
-                get("/cart") { call.respond(viewCart(call.user.id).response(call.language())) }
+                get("/cart") { call.respond(viewCart(call.user.id, call.accessToken()).response(call.language())) }
                 put("/cart/items/{dishId}") {
                     val request = call.receive<CartItemRequest>()
                     call.respond(
@@ -173,9 +208,15 @@ class OrderingRoutes(
                             call.parameters["dishId"].orEmpty(),
                             request.quantity,
                             request.replaceCart,
+                            call.accessToken(),
                         ).response(call.language()),
                     )
                 }
+                put("/cart/coupon") {
+                    val code = call.receive<CouponRequest>().code
+                    call.respond(applyCoupon(call.user.id, code, call.accessToken()).response(call.language()))
+                }
+                delete("/cart/coupon") { call.respond(removeCoupon(call.user.id, call.accessToken()).response(call.language())) }
                 delete("/cart") {
                     clearCart(call.user.id)
                     call.respond(HttpStatusCode.NoContent)
@@ -247,17 +288,24 @@ class OrderingRoutes(
                     CartLineResponse(
                         it.dish.id,
                         it.dish.name.of(language),
-                        it.dish.priceCents,
+                        it.dish.unitPriceCents,
                         it.quantity,
                         it.totalCents,
                         it.dish.available,
+                        it.dish.priceCents.takeIf { _ -> it.dish.onDeal },
+                        it.dish.deal
+                            ?.takeIf { _ ->
+                                it.dish.onDeal
+                            }?.let { deal -> CartDealResponse(deal.percentOff, deal.endsAt.toString()) },
                     )
                 },
             itemCount = lines.sumOf { it.quantity },
             subtotalCents = subtotalCents,
             deliveryFeeCents = deliveryFeeCents,
+            discountCents = discountCents,
             totalCents = totalCents,
             calories = calories,
+            coupon = coupon?.let { CartCouponResponse(it.code, it.kind, it.value, it.maxDiscountCents, it.discountCents, it.problem) },
             problems = problems.map { it.name }.sorted(),
             orderable = orderable,
         )
@@ -279,9 +327,21 @@ class OrderingRoutes(
                     restaurant.location.latitude,
                     restaurant.location.longitude,
                 ),
-            lines = lines.map { OrderLineResponse(it.dishId, it.name.of(language), it.quantity, it.unitPriceCents, it.totalCents) },
+            lines =
+                lines.map {
+                    OrderLineResponse(
+                        it.dishId,
+                        it.name.of(language),
+                        it.quantity,
+                        it.unitPriceCents,
+                        it.totalCents,
+                        it.regularUnitPriceCents,
+                    )
+                },
             subtotalCents = subtotalCents,
             deliveryFeeCents = deliveryFeeCents,
+            discountCents = discountCents,
+            couponCode = couponCode,
             totalCents = totalCents,
             calories = calories,
             dropOff = DropOffResponse(dropOff.location.latitude, dropOff.location.longitude, dropOff.label),

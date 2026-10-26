@@ -13,6 +13,7 @@ import io.github.slashncode.nothingeats.ordering.domain.CartLine
 import io.github.slashncode.nothingeats.ordering.domain.DropOff
 import io.github.slashncode.nothingeats.ordering.domain.Language
 import io.github.slashncode.nothingeats.ordering.domain.Location
+import io.github.slashncode.nothingeats.ordering.domain.MenuDeal
 import io.github.slashncode.nothingeats.ordering.domain.MenuDish
 import io.github.slashncode.nothingeats.ordering.domain.MenuRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.Order
@@ -28,8 +29,10 @@ import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.greater
 import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.less
+import org.jetbrains.exposed.v1.core.lessEq
 import org.jetbrains.exposed.v1.core.longLiteral
 import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.javatime.time
@@ -37,9 +40,11 @@ import org.jetbrains.exposed.v1.javatime.timestampWithTimeZone
 import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.insertIgnore
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.update
 import org.jetbrains.exposed.v1.jdbc.upsert
+import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
@@ -73,6 +78,24 @@ internal object MenuDishesTable : Table("menu_dishes") {
     override val primaryKey = PrimaryKey(id)
 }
 
+internal object MenuDealsTable : Table("menu_deals") {
+    val id = text("id")
+    val dishId = text("dish_id")
+    val priceCents = long("price_cents")
+    val percentOff = integer("percent_off")
+    val startsAt = timestampWithTimeZone("starts_at")
+    val endsAt = timestampWithTimeZone("ends_at")
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+internal object CartCouponsTable : Table("cart_coupons") {
+    val userId = text("user_id")
+    val code = text("code")
+
+    override val primaryKey = PrimaryKey(userId)
+}
+
 internal object CartLinesTable : Table("cart_lines") {
     val userId = text("user_id")
     val dishId = text("dish_id")
@@ -103,6 +126,9 @@ internal object OrdersTable : Table("orders") {
     val status = text("status")
     val statusChangedAt = timestampWithTimeZone("status_changed_at")
     val estimatedArrivalAt = timestampWithTimeZone("estimated_arrival_at")
+    val discountCents = long("discount_cents")
+    val couponCode = text("coupon_code").nullable()
+    val analytics = bool("analytics")
 
     override val primaryKey = PrimaryKey(id)
 }
@@ -116,6 +142,7 @@ internal object OrderLinesTable : Table("order_lines") {
     val unitPriceCents = long("unit_price_cents")
     val quantity = integer("quantity")
     val calories = integer("calories")
+    val regularUnitPriceCents = long("regular_unit_price_cents").nullable()
 
     override val primaryKey = PrimaryKey(orderId, position)
 }
@@ -180,6 +207,21 @@ class ExposedMenu(
         }
     }
 
+    // Deals are immutable; ended ones are pruned here, a day later, so the table stays small.
+    override suspend fun upsertDeal(deal: MenuDeal) {
+        db.transaction {
+            MenuDealsTable.insertIgnore {
+                it[id] = deal.id
+                it[dishId] = deal.dishId
+                it[priceCents] = deal.priceCents
+                it[percentOff] = deal.percentOff
+                it[startsAt] = deal.startsAt.utc()
+                it[endsAt] = deal.endsAt.utc()
+            }
+            MenuDealsTable.deleteWhere { MenuDealsTable.endsAt less Instant.now().minus(DEAL_RETENTION).utc() }
+        }
+    }
+
     override suspend fun restaurant(id: String): MenuRestaurant? =
         db.transaction(readOnly = true) {
             MenuRestaurantsTable.selectAll().where { MenuRestaurantsTable.id eq id }.singleOrNull()?.let {
@@ -198,9 +240,28 @@ class ExposedMenu(
             }
         }
 
-    override suspend fun dishes(ids: Collection<String>): Map<String, MenuDish> {
+    override suspend fun dishes(
+        ids: Collection<String>,
+        at: Instant,
+    ): Map<String, MenuDish> {
         if (ids.isEmpty()) return emptyMap()
         return db.transaction(readOnly = true) {
+            val d = MenuDealsTable
+            val deals =
+                d
+                    .selectAll()
+                    .where { (d.dishId inList ids) and (d.startsAt lessEq at.utc()) and (d.endsAt greater at.utc()) }
+                    .map {
+                        MenuDeal(
+                            it[d.id],
+                            it[d.dishId],
+                            it[d.priceCents],
+                            it[d.percentOff],
+                            it[d.startsAt].toInstant(),
+                            it[d.endsAt].toInstant(),
+                        )
+                    }.groupBy { it.dishId }
+                    .mapValues { (_, running) -> running.minBy { it.priceCents } }
             val t = MenuDishesTable
             t.selectAll().where { t.id inList ids }.associate {
                 it[t.id] to
@@ -211,9 +272,14 @@ class ExposedMenu(
                         it[t.priceCents],
                         it[t.calories],
                         it[t.available],
+                        deals[it[t.id]],
                     )
             }
         }
+    }
+
+    private companion object {
+        val DEAL_RETENTION: Duration = Duration.ofDays(1)
     }
 }
 
@@ -235,6 +301,11 @@ class ExposedCarts(
                     userId,
                     rows.first()[CartLinesTable.restaurantId],
                     rows.map { CartLine(it[CartLinesTable.dishId], it[CartLinesTable.quantity]) },
+                    CartCouponsTable
+                        .selectAll()
+                        .where { CartCouponsTable.userId eq userId }
+                        .singleOrNull()
+                        ?.get(CartCouponsTable.code),
                 )
             }
         }
@@ -256,11 +327,23 @@ class ExposedCarts(
                 this[CartLinesTable.quantity] = line.quantity
                 this[CartLinesTable.addedAt] = existing[line.dishId] ?: now
             }
+            val code = cart.couponCode
+            if (code == null) {
+                CartCouponsTable.deleteWhere { CartCouponsTable.userId eq cart.userId }
+            } else {
+                CartCouponsTable.upsert(CartCouponsTable.userId) {
+                    it[userId] = cart.userId
+                    it[this.code] = code
+                }
+            }
         }
     }
 
     override suspend fun delete(userId: String) {
-        db.transaction { CartLinesTable.deleteWhere { CartLinesTable.userId eq userId } }
+        db.transaction {
+            CartLinesTable.deleteWhere { CartLinesTable.userId eq userId }
+            CartCouponsTable.deleteWhere { CartCouponsTable.userId eq userId }
+        }
     }
 }
 
@@ -289,6 +372,9 @@ class ExposedOrders(
                 it[status] = order.status.name
                 it[statusChangedAt] = order.statusChangedAt.utc()
                 it[estimatedArrivalAt] = order.estimatedArrivalAt.utc()
+                it[discountCents] = order.discountCents
+                it[couponCode] = order.couponCode
+                it[analytics] = order.analytics
             }
             OrderLinesTable.batchInsert(order.lines.withIndex()) { (index, line) ->
                 this[OrderLinesTable.orderId] = order.id
@@ -299,6 +385,7 @@ class ExposedOrders(
                 this[OrderLinesTable.unitPriceCents] = line.unitPriceCents
                 this[OrderLinesTable.quantity] = line.quantity
                 this[OrderLinesTable.calories] = line.calories
+                this[OrderLinesTable.regularUnitPriceCents] = line.regularUnitPriceCents
             }
         }
     }
@@ -361,6 +448,7 @@ class ExposedOrders(
                         it[OrderLinesTable.unitPriceCents],
                         it[OrderLinesTable.quantity],
                         it[OrderLinesTable.calories],
+                        it[OrderLinesTable.regularUnitPriceCents],
                     )
                 }
         return rows.map { it.toOrder(lines[it[t.id]].orEmpty()) }
@@ -389,6 +477,9 @@ class ExposedOrders(
             status = OrderStatus.valueOf(this[t.status]),
             statusChangedAt = this[t.statusChangedAt].toInstant(),
             estimatedArrivalAt = this[t.estimatedArrivalAt].toInstant(),
+            discountCents = this[t.discountCents],
+            couponCode = this[t.couponCode],
+            analytics = this[t.analytics],
         )
     }
 }

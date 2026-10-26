@@ -4,6 +4,14 @@ import io.github.slashncode.nothingeats.delivery.grpc.v1.DeliveryServiceGrpcKt
 import io.github.slashncode.nothingeats.delivery.grpc.v1.QuoteDeliveryRequest
 import io.github.slashncode.nothingeats.delivery.grpc.v1.QuoteDeliveryResponse
 import io.github.slashncode.nothingeats.delivery.grpc.v1.quoteDeliveryResponse
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.LoyaltyServiceGrpcKt
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.PriceCouponRequest
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.PriceCouponResponse
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.RedeemCouponRequest
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.RedeemCouponResponse
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.coupon
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.priceCouponResponse
+import io.github.slashncode.nothingeats.loyalty.grpc.v1.redeemCouponResponse
 import io.github.slashncode.nothingeats.platform.grpc.AuthInterceptor
 import io.github.slashncode.nothingeats.platform.grpc.GrpcCaller
 import io.github.slashncode.nothingeats.platform.grpc.GrpcClientConfig
@@ -43,6 +51,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.net.http.HttpResponse.BodyHandlers
 import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Duration.Companion.seconds
@@ -128,6 +137,48 @@ private class FakeDelivery : DeliveryServiceGrpcKt.DeliveryServiceCoroutineImplB
     }
 }
 
+/** Loyalty as far as ordering can tell: every code is a 10 % coupon, reservations are remembered. */
+private class FakeLoyalty : LoyaltyServiceGrpcKt.LoyaltyServiceCoroutineImplBase() {
+    val reservations = CopyOnWriteArrayList<String>()
+
+    private fun tenPercent(code: String) =
+        coupon {
+            this.code = code.uppercase()
+            kind = "PERCENT"
+            value = 10
+        }
+
+    override suspend fun priceCoupon(request: PriceCouponRequest): PriceCouponResponse =
+        priceCouponResponse {
+            discountCents = request.cart.subtotalCents / 10
+            coupon = tenPercent(request.code)
+        }
+
+    override suspend fun redeemCoupon(request: RedeemCouponRequest): RedeemCouponResponse {
+        reservations += "${GrpcCaller.current().id}:${request.code}:${request.reservationId}"
+        return redeemCouponResponse {
+            discountCents = request.cart.subtotalCents / 10
+            coupon = tenPercent(request.code)
+        }
+    }
+}
+
+private fun deal(dishId: String) =
+    event(
+        "nothingeats.catalog.deal.published.v1",
+        "deal-$dishId",
+        buildJsonObject {
+            put("dealId", "deal-$dishId")
+            put("dishId", dishId)
+            put("restaurantId", restaurantId)
+            put("percentOff", 30)
+            put("priceCents", 450)
+            put("regularPriceCents", 650)
+            put("startsAt", Instant.now().minusSeconds(60).toString())
+            put("endsAt", Instant.now().plusSeconds(1800).toString())
+        },
+    )
+
 private fun placedOrders(): List<CloudEvent> =
     KafkaConsumer(
         mapOf<String, Any>(
@@ -173,6 +224,7 @@ class OrderingFlowTest :
             KafkaTestCluster.createTopics(
                 "catalog.restaurant.v1",
                 "catalog.dish.v1",
+                "catalog.deal.v1",
                 "delivery.delivery.v1",
                 "identity.user.v1",
                 "ordering.order.v1",
@@ -180,8 +232,9 @@ class OrderingFlowTest :
             )
             val tokens = TestTokens()
             val delivery = FakeDelivery()
+            val loyalty = FakeLoyalty()
             val grpcPort = freePort()
-            val deliveryServer = GrpcServer(GrpcServerConfig(port = grpcPort), setOf(delivery), AuthInterceptor(tokens.jwtAuth))
+            val deliveryServer = GrpcServer(GrpcServerConfig(port = grpcPort), setOf(delivery, loyalty), AuthInterceptor(tokens.jwtAuth))
             deliveryServer.onReady()
 
             val port = freePort()
@@ -191,6 +244,7 @@ class OrderingFlowTest :
                     database = PostgresTestDatabases.create(),
                     kafka = KafkaConfig(KafkaTestCluster.bootstrapServers),
                     delivery = GrpcClientConfig(target = "localhost:$grpcPort", deadline = 2.seconds, maxAttempts = 1),
+                    loyalty = GrpcClientConfig(target = "localhost:$grpcPort", deadline = 2.seconds, maxAttempts = 1),
                     lifecycle = LifecycleConfig(drainDelay = kotlin.time.Duration.ZERO),
                 )
             // A failing setup must not leave the fake server running: its threads would keep the test JVM alive.
@@ -236,15 +290,22 @@ class OrderingFlowTest :
                     producer.publish("catalog.dish.v1", dish(tiramisuId, "Tiramisu von morgen", "Tiramisu of Tomorrow", 650))
                     // A newer snapshot of the same dish (higher offset): its price wins.
                     producer.publish("catalog.dish.v1", dish(margheritaId, "Margherita des Nichts", "Margherita of Nothing", 1190))
+                    producer.publish("catalog.deal.v1", deal(tiramisuId))
                 }
 
                 eventually(20.seconds) {
                     call("PUT", "/cart/items/$margheritaId", """{"quantity":2}""").statusCode() shouldBe 200
                     json(call("GET", "/cart")).text("subtotalCents") shouldBe "2380"
                 }
-                val cart = json(call("PUT", "/cart/items/$tiramisuId?lang=en", """{"quantity":1}"""))
-                cart.text("subtotalCents") shouldBe (2 * 1190 + 650).toString()
-                cart.text("orderable") shouldBe "true"
+                // The tiramisu is on a flash deal: 450 instead of 650.
+                eventually(20.seconds) {
+                    val cart = json(call("PUT", "/cart/items/$tiramisuId?lang=en", """{"quantity":1}"""))
+                    cart.text("subtotalCents") shouldBe (2 * 1190 + 450).toString()
+                    cart.text("orderable") shouldBe "true"
+                }
+                val withCoupon = json(call("PUT", "/cart/coupon", """{"code":"ne-ten-2345"}"""))
+                withCoupon.text("discountCents") shouldBe ((2 * 1190 + 450) / 10).toString()
+                withCoupon.getValue("coupon").jsonObject.text("code") shouldBe "NE-TEN-2345"
 
                 val quote = json(call("POST", "/quotes", """{"dropOff":{"latitude":53.5636,"longitude":9.9654}}"""))
                 quote.text("source") shouldBe "delivery"
@@ -261,7 +322,9 @@ class OrderingFlowTest :
                     .first()
                     .jsonObject
                     .text("name") shouldBe "Margherita of Nothing"
-                order.text("totalCents") shouldBe (2 * 1190 + 650 + 199).toString()
+                order.text("totalCents") shouldBe (2 * 1190 + 450 + 199 - 283).toString()
+                order.text("couponCode") shouldBe "NE-TEN-2345"
+                loyalty.reservations.single() shouldBe "ghost-1:NE-TEN-2345:checkout-1"
 
                 val again = call("POST", "/orders", checkout, mapOf("Idempotency-Key" to "checkout-1"))
                 again.statusCode() shouldBe 200
@@ -273,6 +336,12 @@ class OrderingFlowTest :
                     val event = placedOrders().single { it.subject == orderId }
                     event.data.jsonObject.text("quotedSeconds") shouldBe "150"
                     event.data.jsonObject.text("locale") shouldBe "en"
+                    event.data.jsonObject.text("discountCents") shouldBe "283"
+                    event.data.jsonObject
+                        .getValue("coupon")
+                        .jsonObject
+                        .text("code") shouldBe "NE-TEN-2345"
+                    event.data.jsonObject.text("analytics") shouldBe "false"
                 }
 
                 KafkaClients.producer(config.kafka, "test").use { producer ->
@@ -282,6 +351,10 @@ class OrderingFlowTest :
                     }
                 }
                 eventually(20.seconds) { json(call("GET", "/orders/$orderId")).text("status") shouldBe "DELIVERED" }
+                eventually(20.seconds) {
+                    placedOrders().filter { it.subject == orderId }.map { it.type } shouldBe
+                        listOf("nothingeats.ordering.order.placed.v1", "nothingeats.ordering.order.delivered.v1")
+                }
                 call("GET", "/orders").body() shouldContain orderId
 
                 // Delivery down: checkout still works, with the restaurant's own estimate.

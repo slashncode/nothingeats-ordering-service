@@ -19,7 +19,7 @@ jobs:
       contents: write # dependency graph submission on main
     with:
       verify-image: true
-      checkout-repos: nothingeats-delivery-service # its gRPC contract (record 032)
+      checkout-repos: nothingeats-delivery-service nothingeats-loyalty-service # their gRPC contracts (record 032)
 
   # Services push a signed image on main; the template itself only verifies that it builds.
   image:
@@ -27,7 +27,7 @@ jobs:
     needs: kotlin
     uses: slashncode/nothingeats-ci/.github/workflows/kotlin-image.yml@main
     with:
-      checkout-repos: nothingeats-delivery-service
+      checkout-repos: nothingeats-delivery-service nothingeats-loyalty-service
     permissions:
       contents: read
       packages: write # push the image to GHCR
@@ -36,7 +36,7 @@ jobs:
   codeql:
     uses: slashncode/nothingeats-ci/.github/workflows/codeql.yml@main
     with:
-      checkout-repos: nothingeats-delivery-service
+      checkout-repos: nothingeats-delivery-service nothingeats-loyalty-service
     permissions:
       contents: read
       security-events: write

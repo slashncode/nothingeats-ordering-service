@@ -25,6 +25,8 @@ data class OrderLine(
     val unitPriceCents: Long,
     val quantity: Int,
     val calories: Int,
+    /** The menu price when a flash deal made the dish cheaper; null otherwise. */
+    val regularUnitPriceCents: Long? = null,
 ) {
     val totalCents: Long get() = unitPriceCents * quantity
 }
@@ -59,9 +61,14 @@ data class Order(
     val status: OrderStatus,
     val statusChangedAt: Instant,
     val estimatedArrivalAt: Instant,
+    /** What the coupon took off. */
+    val discountCents: Long = 0,
+    val couponCode: String? = null,
+    /** Whether the customer had agreed to analytics at checkout; travels with the order's events. */
+    val analytics: Boolean = false,
 ) {
     val subtotalCents: Long get() = lines.sumOf { it.totalCents }
-    val totalCents: Long get() = subtotalCents + deliveryFeeCents
+    val totalCents: Long get() = subtotalCents + deliveryFeeCents - discountCents
     val calories: Int get() = lines.sumOf { it.calories * it.quantity }
 
     /** Status updates may arrive late or twice; only a step forward counts. */

@@ -7,12 +7,14 @@ data class CartLine(
 
 /**
  * A customer's cart: dishes of one restaurant, like every delivery app. Quantities, not prices:
- * prices are always taken from the menu when the cart is shown or ordered.
+ * prices are always taken from the menu when the cart is shown or ordered. [couponCode] is checked
+ * with the loyalty service each time, too.
  */
 data class Cart(
     val userId: String,
     val restaurantId: String?,
     val lines: List<CartLine>,
+    val couponCode: String? = null,
 ) {
     val isEmpty: Boolean get() = lines.isEmpty()
 
@@ -32,7 +34,7 @@ data class Cart(
         val others = base.filter { it.dishId != dish.id }
         val next = if (quantity == 0) others else others + CartLine(dish.id, quantity)
         if (next.size > MAX_LINES) throw InvalidOrder("dishId", "a cart holds at most $MAX_LINES different dishes")
-        return Cart(userId, if (next.isEmpty()) null else dish.restaurantId, next)
+        return Cart(userId, if (next.isEmpty()) null else dish.restaurantId, next, couponCode)
     }
 
     companion object {
@@ -47,7 +49,7 @@ data class PricedLine(
     val dish: MenuDish,
     val quantity: Int,
 ) {
-    val totalCents: Long get() = dish.priceCents * quantity
+    val totalCents: Long get() = dish.unitPriceCents * quantity
 }
 
 enum class CartProblem {
@@ -58,6 +60,27 @@ enum class CartProblem {
     MINIMUM_NOT_REACHED,
 
     RESTAURANT_CLOSED,
+
+    /** The coupon does not apply (see [CartCoupon.problem] for why) or could not be checked. */
+    COUPON_NOT_APPLICABLE,
+}
+
+/** The cart's coupon as the loyalty service priced it, or why it does not apply. */
+data class CartCoupon(
+    val code: String,
+    val kind: String?,
+    val value: Long,
+    val maxDiscountCents: Long?,
+    val discountCents: Long,
+    /** An error code (`COUPON_MINIMUM_NOT_REACHED`, `COUPON_UNAVAILABLE`, …); null when it applies. */
+    val problem: String?,
+) {
+    companion object {
+        fun refused(
+            code: String,
+            problem: String,
+        ) = CartCoupon(code, null, 0, null, 0, problem)
+    }
 }
 
 /** The cart with today's prices from the menu, and what keeps it from being ordered. */
@@ -65,10 +88,12 @@ data class PricedCart(
     val restaurant: MenuRestaurant?,
     val lines: List<PricedLine>,
     val problems: Set<CartProblem>,
+    val coupon: CartCoupon? = null,
 ) {
     val subtotalCents: Long get() = lines.sumOf { it.totalCents }
     val deliveryFeeCents: Long get() = if (lines.isEmpty()) 0 else restaurant?.deliveryFeeCents ?: 0
-    val totalCents: Long get() = subtotalCents + deliveryFeeCents
+    val discountCents: Long get() = coupon?.takeIf { it.problem == null }?.discountCents ?: 0
+    val totalCents: Long get() = subtotalCents + deliveryFeeCents - discountCents
     val calories: Int get() = lines.sumOf { it.dish.calories * it.quantity }
     val orderable: Boolean get() = restaurant != null && lines.isNotEmpty() && problems.isEmpty()
 
@@ -92,6 +117,10 @@ data class PricedCart(
             return PricedCart(restaurant, lines, problems)
         }
     }
+
+    /** The priced coupon; a coupon that does not apply keeps the cart from being ordered. */
+    fun with(coupon: CartCoupon?): PricedCart =
+        copy(coupon = coupon, problems = if (coupon?.problem != null) problems + CartProblem.COUPON_NOT_APPLICABLE else problems)
 }
 
 class OtherRestaurant(

@@ -20,7 +20,7 @@ import org.slf4j.LoggerFactory
  * delivery down) means checkout goes on with the restaurant's own estimate.
  */
 class GrpcDeliveryQuotes(
-    private val channel: GrpcChannel,
+    val channel: GrpcChannel,
 ) : DeliveryQuotes {
     private val log = LoggerFactory.getLogger(GrpcDeliveryQuotes::class.java)
     private val stub = DeliveryServiceGrpcKt.DeliveryServiceCoroutineStub(channel.channel)

@@ -4,6 +4,7 @@ import io.github.slashncode.nothingeats.ordering.application.FollowDelivery
 import io.github.slashncode.nothingeats.ordering.application.ForgetUser
 import io.github.slashncode.nothingeats.ordering.application.ProjectMenu
 import io.github.slashncode.nothingeats.ordering.domain.Location
+import io.github.slashncode.nothingeats.ordering.domain.MenuDeal
 import io.github.slashncode.nothingeats.ordering.domain.MenuDish
 import io.github.slashncode.nothingeats.ordering.domain.MenuRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.OrderStatus
@@ -48,9 +49,20 @@ internal data class DishPublished(
     val available: Boolean = true,
 )
 
+@Serializable
+internal data class DealPublished(
+    val dealId: String,
+    val dishId: String,
+    val percentOff: Int,
+    val priceCents: Long,
+    val startsAt: String,
+    val endsAt: String,
+)
+
 /**
- * `catalog.restaurant.v1` and `catalog.dish.v1` (catalog-service docs/events.md) into the menu
- * projection, versioned by offset, so a late or repeated snapshot never wins over a newer one.
+ * `catalog.restaurant.v1`, `catalog.dish.v1` and `catalog.deal.v1` (catalog-service docs/events.md)
+ * into the menu projection. Restaurants and dishes are versioned by offset, so a late or repeated
+ * snapshot never wins over a newer one; deals never change, so the first copy is the copy.
  */
 class CatalogEventsHandler(
     override val topic: String,
@@ -87,14 +99,20 @@ class CatalogEventsHandler(
                     position.offset,
                 )
             }
+            DEAL -> {
+                val d = event.decode(DealPublished.serializer())
+                project.deal(MenuDeal(d.dealId, d.dishId, d.priceCents, d.percentOff, Instant.parse(d.startsAt), Instant.parse(d.endsAt)))
+            }
         }
     }
 
     companion object {
         const val RESTAURANTS = "catalog.restaurant.v1"
         const val DISHES = "catalog.dish.v1"
+        const val DEALS = "catalog.deal.v1"
         private const val RESTAURANT = "nothingeats.catalog.restaurant.published.v1"
         private const val DISH = "nothingeats.catalog.dish.published.v1"
+        private const val DEAL = "nothingeats.catalog.deal.published.v1"
     }
 }
 

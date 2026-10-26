@@ -1,6 +1,7 @@
 package io.github.slashncode.nothingeats.ordering.app
 
 import io.github.slashncode.nothingeats.ordering.adapters.grpc.GrpcDeliveryQuotes
+import io.github.slashncode.nothingeats.ordering.adapters.grpc.GrpcLoyaltyCoupons
 import io.github.slashncode.nothingeats.ordering.adapters.http.OrderingRoutes
 import io.github.slashncode.nothingeats.ordering.adapters.messaging.CatalogEventsHandler
 import io.github.slashncode.nothingeats.ordering.adapters.messaging.DeliveryEventsHandler
@@ -12,6 +13,7 @@ import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedMen
 import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedOrderRequests
 import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedOrders
 import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedTransactions
+import io.github.slashncode.nothingeats.ordering.application.ApplyCoupon
 import io.github.slashncode.nothingeats.ordering.application.Carts
 import io.github.slashncode.nothingeats.ordering.application.ChangeCart
 import io.github.slashncode.nothingeats.ordering.application.ClearCart
@@ -21,6 +23,7 @@ import io.github.slashncode.nothingeats.ordering.application.FollowDelivery
 import io.github.slashncode.nothingeats.ordering.application.ForgetUser
 import io.github.slashncode.nothingeats.ordering.application.GetOrder
 import io.github.slashncode.nothingeats.ordering.application.ListOrders
+import io.github.slashncode.nothingeats.ordering.application.LoyaltyCoupons
 import io.github.slashncode.nothingeats.ordering.application.Menu
 import io.github.slashncode.nothingeats.ordering.application.OrderEvents
 import io.github.slashncode.nothingeats.ordering.application.OrderRequests
@@ -28,6 +31,7 @@ import io.github.slashncode.nothingeats.ordering.application.Orders
 import io.github.slashncode.nothingeats.ordering.application.PlaceOrder
 import io.github.slashncode.nothingeats.ordering.application.ProjectMenu
 import io.github.slashncode.nothingeats.ordering.application.QuoteCheckout
+import io.github.slashncode.nothingeats.ordering.application.RemoveCoupon
 import io.github.slashncode.nothingeats.ordering.application.Transactions
 import io.github.slashncode.nothingeats.ordering.application.ViewCart
 import io.github.slashncode.nothingeats.platform.core.analytics.ProductAnalytics
@@ -197,18 +201,29 @@ abstract class ServiceComponent(
     @Provides
     fun purgeMessaging(postgres: PostgresDatabase): CronTask = PurgeMessagingTask(postgres)
 
-    // Delivery (gRPC)
+    // Delivery and loyalty (gRPC), one channel each
 
     @ServiceScope
     @Provides
-    fun deliveryChannel(): GrpcChannel = GrpcChannel(config.delivery)
+    fun deliveryQuotes(): GrpcDeliveryQuotes = GrpcDeliveryQuotes(GrpcChannel(config.delivery))
+
+    @Provides
+    fun deliveryQuotesPort(quotes: GrpcDeliveryQuotes): DeliveryQuotes = quotes
 
     @IntoSet
     @Provides
-    fun deliveryChannelLifecycle(channel: GrpcChannel): LifecycleComponent = channel
+    fun deliveryChannelLifecycle(quotes: GrpcDeliveryQuotes): LifecycleComponent = quotes.channel
+
+    @ServiceScope
+    @Provides
+    fun loyaltyCoupons(): GrpcLoyaltyCoupons = GrpcLoyaltyCoupons(GrpcChannel(config.loyalty))
 
     @Provides
-    fun deliveryQuotes(channel: GrpcChannel): DeliveryQuotes = GrpcDeliveryQuotes(channel)
+    fun loyaltyCouponsPort(coupons: GrpcLoyaltyCoupons): LoyaltyCoupons = coupons
+
+    @IntoSet
+    @Provides
+    fun loyaltyChannelLifecycle(coupons: GrpcLoyaltyCoupons): LifecycleComponent = coupons.channel
 
     // Ordering
 
@@ -234,7 +249,8 @@ abstract class ServiceComponent(
     fun viewCart(
         carts: Carts,
         menu: Menu,
-    ): ViewCart = ViewCart(carts, menu)
+        coupons: LoyaltyCoupons,
+    ): ViewCart = ViewCart(carts, menu, coupons)
 
     @IntoSet
     @Provides
@@ -246,16 +262,32 @@ abstract class ServiceComponent(
         requests: OrderRequests,
         events: OrderEvents,
         quotes: DeliveryQuotes,
+        coupons: LoyaltyCoupons,
         transactions: Transactions,
         analytics: ProductAnalytics,
         clock: Clock,
     ): HttpRoutes =
         OrderingRoutes(
             viewCart = view,
-            changeCart = ChangeCart(carts, menu, view, analytics),
+            changeCart = ChangeCart(carts, menu, view, analytics, clock),
             clearCart = ClearCart(carts),
+            applyCoupon = ApplyCoupon(carts, view, analytics),
+            removeCoupon = RemoveCoupon(carts, view),
             quoteCheckout = QuoteCheckout(view, quotes, config.checkout),
-            placeOrder = PlaceOrder(view, carts, orders, requests, events, quotes, transactions, analytics, config.checkout, clock),
+            placeOrder =
+                PlaceOrder(
+                    view,
+                    carts,
+                    orders,
+                    requests,
+                    events,
+                    quotes,
+                    coupons,
+                    transactions,
+                    analytics,
+                    config.checkout,
+                    clock,
+                ),
             listOrders = ListOrders(orders),
             getOrder = GetOrder(orders),
             exportOrders = ExportOrders(orders),
@@ -271,7 +303,15 @@ abstract class ServiceComponent(
 
     @IntoSet
     @Provides
-    fun deliveryEvents(orders: Orders): EventHandler = DeliveryEventsHandler(FollowDelivery(orders))
+    fun dealEvents(menu: Menu): EventHandler = CatalogEventsHandler(CatalogEventsHandler.DEALS, ProjectMenu(menu))
+
+    @IntoSet
+    @Provides
+    fun deliveryEvents(
+        orders: Orders,
+        events: OrderEvents,
+        transactions: Transactions,
+    ): EventHandler = DeliveryEventsHandler(FollowDelivery(orders, events, transactions))
 
     @IntoSet
     @Provides

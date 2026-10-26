@@ -1,5 +1,6 @@
 package io.github.slashncode.nothingeats.ordering.application
 
+import io.github.slashncode.nothingeats.ordering.domain.MenuDeal
 import io.github.slashncode.nothingeats.ordering.domain.MenuDish
 import io.github.slashncode.nothingeats.ordering.domain.MenuRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.Order
@@ -53,9 +54,15 @@ class GetOrder(
     ): Order = orders.find(orderId)?.takeIf { it.userId == userId } ?: throw orderNotFound()
 }
 
-/** `delivery.delivery.v1`: the order follows its delivery, one step forward at a time. */
+/**
+ * `delivery.delivery.v1`: the order follows its delivery, one step forward at a time. Arriving is
+ * ordering's own news too (`delivered` on `ordering.order.v1`, after `placed` under the same key),
+ * so loyalty and others learn it from the order's topic.
+ */
 class FollowDelivery(
     private val orders: Orders,
+    private val events: OrderEvents,
+    private val transactions: Transactions,
 ) {
     suspend operator fun invoke(
         orderId: String,
@@ -63,8 +70,12 @@ class FollowDelivery(
         at: Instant,
         estimatedArrivalAt: Instant?,
     ) {
-        val order = orders.find(orderId) ?: return
-        order.follow(status, at, estimatedArrivalAt)?.let { orders.updateStatus(it) }
+        transactions.run {
+            val order = orders.find(orderId) ?: return@run
+            val next = order.follow(status, at, estimatedArrivalAt) ?: return@run
+            orders.updateStatus(next)
+            if (next.status == OrderStatus.DELIVERED) events.delivered(next)
+        }
     }
 }
 
@@ -81,6 +92,8 @@ class ProjectMenu(
         dish: MenuDish,
         version: Long,
     ) = menu.upsertDish(dish, version)
+
+    suspend fun deal(deal: MenuDeal) = menu.upsertDeal(deal)
 }
 
 /** `user.deleted`: orders (with drop-off locations) and the cart go. */

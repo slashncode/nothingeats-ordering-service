@@ -2,6 +2,7 @@ package io.github.slashncode.nothingeats.ordering.adapters.persistence
 
 import io.github.slashncode.nothingeats.ordering.application.ChangeCart
 import io.github.slashncode.nothingeats.ordering.application.CheckoutSettings
+import io.github.slashncode.nothingeats.ordering.application.FakeCoupons
 import io.github.slashncode.nothingeats.ordering.application.FakeQuotes
 import io.github.slashncode.nothingeats.ordering.application.MovableClock
 import io.github.slashncode.nothingeats.ordering.application.PlaceOrder
@@ -42,8 +43,9 @@ class IdempotentCheckoutTest :
             val orders = ExposedOrders(db)
             val events = RecordingOrderEvents()
             // 12:00 UTC is 13:00 in Berlin: the restaurant is open.
-            val view = ViewCart(carts, menu, MovableClock(Instant.parse("2026-10-26T12:00:00Z")))
-            ChangeCart(carts, menu, view, RecordingAnalytics())("u-1", margherita.id, 2, replaceCart = false)
+            val clock = MovableClock(Instant.parse("2026-10-26T12:00:00Z"))
+            val view = ViewCart(carts, menu, FakeCoupons(), clock)
+            ChangeCart(carts, menu, view, RecordingAnalytics(), clock)("u-1", margherita.id, 2, replaceCart = false, accessToken = "token")
             val place =
                 PlaceOrder(
                     view,
@@ -52,6 +54,7 @@ class IdempotentCheckoutTest :
                     ExposedOrderRequests(db),
                     events,
                     FakeQuotes(),
+                    FakeCoupons(),
                     ExposedTransactions(db),
                     RecordingAnalytics(),
                     CheckoutSettings(),

@@ -1,5 +1,6 @@
 package io.github.slashncode.nothingeats.ordering.domain
 
+import java.time.Instant
 import java.time.LocalTime
 
 enum class Language(
@@ -71,7 +72,22 @@ data class MenuRestaurant(
     }
 }
 
-/** A dish as ordering knows it, projected from `catalog.dish.v1`. */
+/** A flash deal, projected from `catalog.deal.v1`: the dish costs [priceCents] until [endsAt]. */
+data class MenuDeal(
+    val id: String,
+    val dishId: String,
+    val priceCents: Long,
+    val percentOff: Int,
+    val startsAt: Instant,
+    val endsAt: Instant,
+) {
+    fun isActiveAt(time: Instant): Boolean = !time.isBefore(startsAt) && time.isBefore(endsAt)
+}
+
+/**
+ * A dish as ordering knows it, projected from `catalog.dish.v1`. [priceCents] is the menu price;
+ * [deal] is the flash deal running when the dish was looked up, if any.
+ */
 data class MenuDish(
     val id: String,
     val restaurantId: String,
@@ -79,4 +95,10 @@ data class MenuDish(
     val priceCents: Long,
     val calories: Int,
     val available: Boolean,
-)
+    val deal: MenuDeal? = null,
+) {
+    /** What one costs right now: the deal price, unless the menu price dropped below it since. */
+    val unitPriceCents: Long get() = deal?.priceCents?.coerceAtMost(priceCents) ?: priceCents
+
+    val onDeal: Boolean get() = unitPriceCents < priceCents
+}

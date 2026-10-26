@@ -10,6 +10,7 @@ import io.github.slashncode.nothingeats.ordering.domain.OrderStatus
 import io.github.slashncode.nothingeats.ordering.domain.OrderedRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.PricedCart
 import io.github.slashncode.nothingeats.ordering.domain.QuoteSource
+import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.core.analytics.ProductAnalytics
 import io.github.slashncode.nothingeats.platform.core.error.AppError
 import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
@@ -69,6 +70,7 @@ private fun CartProblem.message() =
         CartProblem.DISH_UNAVAILABLE -> "A dish in the cart is no longer available"
         CartProblem.MINIMUM_NOT_REACHED -> "The cart is below the restaurant's minimum order"
         CartProblem.RESTAURANT_CLOSED -> "The restaurant is closed right now"
+        CartProblem.COUPON_NOT_APPLICABLE -> "The coupon in the cart does not apply; remove it or change the cart"
     }
 
 /** `POST /quotes`: the arrival time for the cart and a drop-off, before the customer commits. */
@@ -82,7 +84,7 @@ class QuoteCheckout(
         dropOff: DropOff,
         accessToken: String,
     ): CheckoutQuote {
-        val restaurant = view(userId).requireOrderable()
+        val restaurant = view(userId, accessToken).requireOrderable()
         return quotes.quoteOrEstimate(restaurant, dropOff, accessToken, settings)
     }
 }
@@ -95,9 +97,11 @@ data class PlacedOrder(
 
 /**
  * `POST /orders` ("pay with willpower"): the cart becomes an order with frozen names and prices.
- * The quote is asked before the transaction (no remote call inside one); order, idempotency key,
- * outbox event and the emptied cart are one transaction. The same key with the same request
- * returns the first order; with a different request it is refused.
+ * The quote and the coupon reservation are asked before the transaction (no remote call inside
+ * one); order, idempotency key, outbox event and the emptied cart are one transaction. The same
+ * key with the same request returns the first order; with a different request it is refused.
+ * The coupon is reserved under the idempotency key, so a retried checkout holds the same one, and
+ * the `placed` event redeems it for good.
  */
 class PlaceOrder(
     private val view: ViewCart,
@@ -106,6 +110,7 @@ class PlaceOrder(
     private val requests: OrderRequests,
     private val events: OrderEvents,
     private val quotes: DeliveryQuotes,
+    private val coupons: LoyaltyCoupons,
     private val transactions: Transactions,
     private val analytics: ProductAnalytics,
     private val settings: CheckoutSettings,
@@ -122,7 +127,7 @@ class PlaceOrder(
         val hash = hash(dropOff)
         replay(userId, key, hash)?.let { return it }
 
-        val cart = view(userId)
+        val cart = view(userId, accessToken)
         val restaurant =
             try {
                 cart.requireOrderable()
@@ -130,6 +135,11 @@ class PlaceOrder(
                 // A concurrent request with this key may have just ordered and emptied the cart.
                 replay(userId, key, hash)?.let { return it }
                 throw e
+            }
+        val coupon =
+            cart.coupon?.let { applied ->
+                val input = checkNotNull(cart.couponInput())
+                coupons.redeem(applied.code, key, input, accessToken) ?: throw couponUnavailable()
             }
         val quote = quotes.quoteOrEstimate(restaurant, dropOff, accessToken, settings)
         val now = clock.instant()
@@ -146,7 +156,17 @@ class PlaceOrder(
                         restaurant.location,
                         restaurant.preparationMinutes,
                     ),
-                lines = cart.lines.map { OrderLine(it.dish.id, it.dish.name, it.dish.priceCents, it.quantity, it.dish.calories) },
+                lines =
+                    cart.lines.map {
+                        OrderLine(
+                            it.dish.id,
+                            it.dish.name,
+                            it.dish.unitPriceCents,
+                            it.quantity,
+                            it.dish.calories,
+                            regularUnitPriceCents = it.dish.priceCents.takeIf { _ -> it.dish.onDeal },
+                        )
+                    },
                 deliveryFeeCents = cart.deliveryFeeCents,
                 dropOff = dropOff,
                 quotedSeconds = quote.etaSeconds,
@@ -155,6 +175,9 @@ class PlaceOrder(
                 status = OrderStatus.PLACED,
                 statusChangedAt = now,
                 estimatedArrivalAt = now.plusSeconds(quote.etaSeconds.toLong()),
+                discountCents = coupon?.discountCents ?: 0,
+                couponCode = coupon?.code,
+                analytics = AnalyticsContext.consented(),
             )
         try {
             transactions.run {
@@ -174,6 +197,9 @@ class PlaceOrder(
                 "restaurant_slug" to restaurant.slug,
                 "items" to order.lines.sumOf { it.quantity },
                 "subtotal_cents" to order.subtotalCents,
+                "discount_cents" to order.discountCents,
+                "coupon_kind" to coupon?.kind?.lowercase(),
+                "deal_items" to order.lines.filter { it.regularUnitPriceCents != null }.sumOf { it.quantity },
                 // Nothing is charged: what the customer saved by ordering nothing.
                 "money_not_spent_cents" to order.totalCents,
                 "calories_avoided" to order.calories,

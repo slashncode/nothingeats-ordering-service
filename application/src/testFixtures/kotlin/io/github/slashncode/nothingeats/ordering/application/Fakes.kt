@@ -2,10 +2,12 @@ package io.github.slashncode.nothingeats.ordering.application
 
 import io.github.slashncode.nothingeats.ordering.domain.Cart
 import io.github.slashncode.nothingeats.ordering.domain.Location
+import io.github.slashncode.nothingeats.ordering.domain.MenuDeal
 import io.github.slashncode.nothingeats.ordering.domain.MenuDish
 import io.github.slashncode.nothingeats.ordering.domain.MenuRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.Order
 import io.github.slashncode.nothingeats.ordering.domain.Text
+import io.github.slashncode.nothingeats.platform.core.error.AppError
 import java.time.Clock
 import java.time.Instant
 import java.time.LocalTime
@@ -31,9 +33,21 @@ class InMemoryMenu : Menu {
         dishes.merge(dish.id, dish to version) { old, new -> if (new.second > old.second) new else old }
     }
 
+    val deals = ConcurrentHashMap<String, MenuDeal>()
+
+    override suspend fun upsertDeal(deal: MenuDeal) {
+        deals.putIfAbsent(deal.id, deal)
+    }
+
     override suspend fun restaurant(id: String) = restaurants[id]?.first
 
-    override suspend fun dishes(ids: Collection<String>) = ids.mapNotNull { dishes[it]?.first }.associateBy { it.id }
+    override suspend fun dishes(
+        ids: Collection<String>,
+        at: Instant,
+    ) = ids
+        .mapNotNull { dishes[it]?.first }
+        .map { dish -> dish.copy(deal = deals.values.filter { it.dishId == dish.id && it.isActiveAt(at) }.minByOrNull { it.priceCents }) }
+        .associateBy { it.id }
 }
 
 class InMemoryCarts : Carts {
@@ -100,10 +114,47 @@ class InMemoryRequests : OrderRequests {
 
 class RecordingOrderEvents : OrderEvents {
     val placed = mutableListOf<Order>()
+    val delivered = mutableListOf<Order>()
 
     override suspend fun placed(order: Order) {
         placed += order
     }
+
+    override suspend fun delivered(order: Order) {
+        delivered += order
+    }
+}
+
+/**
+ * Loyalty's coupons as ordering sees them: [offers] by code (a 10 % coupon unless told otherwise),
+ * [refusals] by code, and null answers while [down].
+ */
+class FakeCoupons : LoyaltyCoupons {
+    val refusals = ConcurrentHashMap<String, AppError>()
+    val reservations = mutableListOf<Pair<String, String>>()
+    var down = false
+
+    private fun offer(
+        code: String,
+        cart: CouponCartInput,
+    ): CouponOffer? {
+        if (down) return null
+        refusals[code]?.let { throw it }
+        return CouponOffer(code, "PERCENT", 10, null, cart.subtotalCents / 10)
+    }
+
+    override suspend fun price(
+        code: String,
+        cart: CouponCartInput,
+        accessToken: String,
+    ) = offer(code, cart)
+
+    override suspend fun redeem(
+        code: String,
+        reservationId: String,
+        cart: CouponCartInput,
+        accessToken: String,
+    ) = offer(code, cart)?.also { reservations += code to reservationId }
 }
 
 /** Answers with [answer]; null plays a delivery service that did not answer in time. */

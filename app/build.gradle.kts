@@ -12,7 +12,8 @@ dependencies {
     implementation(project(":adapters"))
 
     testImplementation(libs.nothingeats.platform.testing)
-    // A fake delivery service in the flow test speaks the real contract.
+    // Fake delivery and loyalty services in the flow test speak the real contracts.
     testImplementation("io.github.slashncode.nothingeats.delivery:grpc-api")
+    testImplementation("io.github.slashncode.nothingeats.loyalty:grpc-api")
     testImplementation(libs.konsist)
 }

@@ -1,12 +1,15 @@
 package io.github.slashncode.nothingeats.ordering.application
 
+import io.github.slashncode.nothingeats.ordering.domain.CartProblem
 import io.github.slashncode.nothingeats.ordering.domain.DropOff
 import io.github.slashncode.nothingeats.ordering.domain.Language
 import io.github.slashncode.nothingeats.ordering.domain.Location
+import io.github.slashncode.nothingeats.ordering.domain.MenuDeal
 import io.github.slashncode.nothingeats.ordering.domain.OrderStatus
 import io.github.slashncode.nothingeats.ordering.domain.QuoteSource
 import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.core.error.AppError
+import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
 import io.github.slashncode.nothingeats.platform.testing.RecordingAnalytics
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -27,11 +30,14 @@ private class World(
     val requests = InMemoryRequests()
     val events = RecordingOrderEvents()
     val quotes = FakeQuotes()
+    val coupons = FakeCoupons()
     val analytics = RecordingAnalytics()
-    val view = ViewCart(carts, menu, clock)
-    private val changeCart = ChangeCart(carts, menu, view, analytics)
+    val view = ViewCart(carts, menu, coupons, clock)
+    private val changeCart = ChangeCart(carts, menu, view, analytics, clock)
     private val placeOrder =
-        PlaceOrder(view, carts, orders, requests, events, quotes, DirectTransactions, analytics, CheckoutSettings(), clock)
+        PlaceOrder(view, carts, orders, requests, events, quotes, coupons, DirectTransactions, analytics, CheckoutSettings(), clock)
+    val applyCoupon = ApplyCoupon(carts, view, analytics)
+    val follow = FollowDelivery(orders, events, DirectTransactions)
 
     // Server-side events need the visitor's distinct id, which arrives with the request after consent.
     private val visitor = AnalyticsContext("visitor-1", "session-1")
@@ -41,7 +47,7 @@ private class World(
         dishId: String,
         quantity: Int,
         replaceCart: Boolean,
-    ) = withContext(visitor) { changeCart(userId, dishId, quantity, replaceCart) }
+    ) = withContext(visitor) { changeCart(userId, dishId, quantity, replaceCart, "t") }
 
     suspend fun place(
         userId: String,
@@ -148,8 +154,8 @@ class OrderingUseCasesTest :
             world.change("u-1", "d-1", 2, replaceCart = false)
             val second = world.place("u-1", Language.DE, "t", "k2", schanze).order
 
-            FollowDelivery(world.orders)(first.id, OrderStatus.EN_ROUTE, lunch.plusSeconds(90), lunch.plusSeconds(200))
-            FollowDelivery(world.orders)(first.id, OrderStatus.COOKING, lunch.plusSeconds(91), null)
+            world.follow(first.id, OrderStatus.EN_ROUTE, lunch.plusSeconds(90), lunch.plusSeconds(200))
+            world.follow(first.id, OrderStatus.COOKING, lunch.plusSeconds(91), null)
             world.orders.rows
                 .getValue(first.id)
                 .status shouldBe OrderStatus.EN_ROUTE
@@ -164,5 +170,97 @@ class OrderingUseCasesTest :
 
             ForgetUser(world.orders, world.carts, DirectTransactions)("u-1") shouldBe 2
             world.orders.rows shouldBe emptyMap()
+        }
+
+        test("a running flash deal prices the cart and is frozen into the order; after it ends the menu price is back") {
+            val world = World()
+            world.menu.seeded()
+            world.menu.upsertDeal(MenuDeal("deal-1", "d-1", 760, 30, lunch.minusSeconds(60), lunch.plusSeconds(1800)))
+            world.change("u-1", "d-1", 2, replaceCart = false)
+
+            val cart = world.view("u-1", "t")
+            cart.subtotalCents shouldBe 2 * 760
+            cart.lines
+                .single()
+                .dish.onDeal shouldBe true
+            world.analytics.events
+                .single()
+                .properties["price_cents"] shouldBe 760L
+
+            val order = world.place("u-1", Language.DE, "t", "k1", schanze).order
+            order.lines.single().unitPriceCents shouldBe 760
+            order.lines.single().regularUnitPriceCents shouldBe 1090
+
+            world.change("u-1", "d-1", 2, replaceCart = false)
+            world.clock.now = lunch.plusSeconds(1800)
+            world.view("u-1", "t").subtotalCents shouldBe 2 * 1090
+        }
+
+        test("a coupon goes into the cart only when it applies, is reserved under the checkout's key and lowers the total") {
+            val world = World().fill()
+            world.coupons.refusals["NE-USED-0000"] = AppError.Conflict(ErrorCode("COUPON_USED"), "used")
+
+            shouldThrow<AppError.Conflict> { world.applyCoupon("u-1", "ne-used-0000", "t") }.code.value shouldBe "COUPON_USED"
+            world.carts.rows
+                .getValue("u-1")
+                .couponCode shouldBe null
+
+            val cart = world.applyCoupon("u-1", " ne-ten-2345 ", "t")
+            cart.discountCents shouldBe 218
+            cart.totalCents shouldBe 2 * 1090 + 199 - 218
+            world.carts.rows
+                .getValue("u-1")
+                .couponCode shouldBe "NE-TEN-2345"
+
+            val order = world.place("u-1", Language.DE, "t", "key-9", schanze).order
+            order.discountCents shouldBe 218
+            order.couponCode shouldBe "NE-TEN-2345"
+            order.totalCents shouldBe 2 * 1090 + 199 - 218
+            world.coupons.reservations shouldBe listOf("NE-TEN-2345" to "key-9")
+            world.events.placed
+                .single()
+                .analytics shouldBe true
+        }
+
+        test("a coupon that stops applying blocks the cart; loyalty being down blocks the checkout, not the cart view") {
+            val world = World().fill()
+            world.applyCoupon("u-1", "NE-TEN-2345", "t")
+
+            world.coupons.refusals["NE-TEN-2345"] = AppError.Invalid(ErrorCode("COUPON_MINIMUM_NOT_REACHED"), "too small")
+            val refused = world.view("u-1", "t")
+            refused.coupon?.problem shouldBe "COUPON_MINIMUM_NOT_REACHED"
+            refused.problems shouldBe setOf(CartProblem.COUPON_NOT_APPLICABLE)
+            refused.totalCents shouldBe 2 * 1090 + 199
+
+            world.coupons.refusals.clear()
+            world.coupons.down = true
+            world.view("u-1", "t").coupon?.problem shouldBe "COUPON_UNAVAILABLE"
+            shouldThrow<AppError.Conflict> { world.place("u-1", Language.DE, "t", "k1", schanze) }.code.value shouldBe
+                "CART_COUPON_NOT_APPLICABLE"
+            world.coupons.down = false
+            RemoveCoupon(world.carts, world.view)("u-1", "t").coupon shouldBe null
+        }
+
+        test("without analytics consent the order says so; arriving publishes delivered once") {
+            val world = World().fill()
+            val order =
+                PlaceOrder(
+                    world.view,
+                    world.carts,
+                    world.orders,
+                    world.requests,
+                    world.events,
+                    world.quotes,
+                    world.coupons,
+                    DirectTransactions,
+                    world.analytics,
+                    CheckoutSettings(),
+                    world.clock,
+                )("u-1", Language.DE, "t", "k1", schanze).order
+
+            order.analytics shouldBe false
+            world.follow(order.id, OrderStatus.DELIVERED, lunch.plusSeconds(170), null)
+            world.follow(order.id, OrderStatus.DELIVERED, lunch.plusSeconds(171), null)
+            world.events.delivered.map { it.id } shouldBe listOf(order.id)
         }
     })

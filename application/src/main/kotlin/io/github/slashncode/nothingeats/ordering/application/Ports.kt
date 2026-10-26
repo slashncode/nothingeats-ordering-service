@@ -2,6 +2,7 @@ package io.github.slashncode.nothingeats.ordering.application
 
 import io.github.slashncode.nothingeats.ordering.domain.Cart
 import io.github.slashncode.nothingeats.ordering.domain.Location
+import io.github.slashncode.nothingeats.ordering.domain.MenuDeal
 import io.github.slashncode.nothingeats.ordering.domain.MenuDish
 import io.github.slashncode.nothingeats.ordering.domain.MenuRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.Order
@@ -22,9 +23,16 @@ interface Menu {
         version: Long,
     )
 
+    /** Deals never change once published; a repeated event changes nothing. */
+    suspend fun upsertDeal(deal: MenuDeal)
+
     suspend fun restaurant(id: String): MenuRestaurant?
 
-    suspend fun dishes(ids: Collection<String>): Map<String, MenuDish>
+    /** The dishes with the deal running at [at], if any. */
+    suspend fun dishes(
+        ids: Collection<String>,
+        at: Instant,
+    ): Map<String, MenuDish>
 }
 
 interface Carts {
@@ -85,6 +93,8 @@ class DuplicateRequest : Exception("A request with this idempotency key exists a
 /** `ordering.order.v1` through the outbox: call inside the transaction that stores the order. */
 interface OrderEvents {
     suspend fun placed(order: Order)
+
+    suspend fun delivered(order: Order)
 }
 
 data class DeliveryQuote(
@@ -106,6 +116,43 @@ interface DeliveryQuotes {
         preparationMinutes: Int,
         accessToken: String,
     ): DeliveryQuote?
+}
+
+/** The part of a cart a coupon is priced on. */
+data class CouponCartInput(
+    val restaurantId: String,
+    val subtotalCents: Long,
+    val deliveryFeeCents: Long,
+    val unitPricesCents: List<Long>,
+)
+
+data class CouponOffer(
+    val code: String,
+    val kind: String,
+    val value: Long,
+    val maxDiscountCents: Long?,
+    val discountCents: Long,
+)
+
+/** The loyalty service (gRPC), asked on the customer's behalf: coupons belong to it. */
+interface LoyaltyCoupons {
+    /**
+     * Null when loyalty did not answer in time.
+     * @throws io.github.slashncode.nothingeats.platform.core.error.AppError with a `COUPON_*` code when the coupon does not apply.
+     */
+    suspend fun price(
+        code: String,
+        cart: CouponCartInput,
+        accessToken: String,
+    ): CouponOffer?
+
+    /** Holds the coupon for this checkout ([reservationId] = its idempotency key). Null when loyalty did not answer. */
+    suspend fun redeem(
+        code: String,
+        reservationId: String,
+        cart: CouponCartInput,
+        accessToken: String,
+    ): CouponOffer?
 }
 
 interface Transactions {
