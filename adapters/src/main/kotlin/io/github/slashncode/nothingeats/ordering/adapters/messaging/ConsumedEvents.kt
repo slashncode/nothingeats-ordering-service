@@ -47,6 +47,8 @@ internal data class DishPublished(
     val priceCents: Long,
     val calories: Int,
     val available: Boolean = true,
+    /** Left the shop, by itself or with its restaurant. */
+    val archived: Boolean = false,
 )
 
 @Serializable
@@ -95,7 +97,8 @@ class CatalogEventsHandler(
             DISH -> {
                 val d = event.decode(DishPublished.serializer())
                 project.dish(
-                    MenuDish(d.dishId, d.restaurantId, Text(d.name.de, d.name.en), d.priceCents, d.calories, d.available),
+                    // An archived dish stays in past orders but cannot be ordered again.
+                    MenuDish(d.dishId, d.restaurantId, Text(d.name.de, d.name.en), d.priceCents, d.calories, d.available && !d.archived),
                     position.offset,
                 )
             }
