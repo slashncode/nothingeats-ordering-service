@@ -13,6 +13,7 @@ import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedMen
 import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedOrderRequests
 import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedOrders
 import io.github.slashncode.nothingeats.ordering.adapters.persistence.ExposedTransactions
+import io.github.slashncode.nothingeats.ordering.application.AdminOrders
 import io.github.slashncode.nothingeats.ordering.application.ApplyCoupon
 import io.github.slashncode.nothingeats.ordering.application.Carts
 import io.github.slashncode.nothingeats.ordering.application.ChangeCart
@@ -291,6 +292,7 @@ abstract class ServiceComponent(
             listOrders = ListOrders(orders),
             getOrder = GetOrder(orders),
             exportOrders = ExportOrders(orders),
+            adminOrders = AdminOrders(orders, clock),
         )
 
     @IntoSet

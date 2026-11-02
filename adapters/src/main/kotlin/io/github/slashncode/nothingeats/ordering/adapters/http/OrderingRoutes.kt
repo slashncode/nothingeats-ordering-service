@@ -1,5 +1,6 @@
 package io.github.slashncode.nothingeats.ordering.adapters.http
 
+import io.github.slashncode.nothingeats.ordering.application.AdminOrders
 import io.github.slashncode.nothingeats.ordering.application.ApplyCoupon
 import io.github.slashncode.nothingeats.ordering.application.ChangeCart
 import io.github.slashncode.nothingeats.ordering.application.CheckoutQuote
@@ -22,6 +23,7 @@ import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
 import io.github.slashncode.nothingeats.platform.core.error.Violation
 import io.github.slashncode.nothingeats.platform.http.HttpRoutes
 import io.github.slashncode.nothingeats.platform.http.auth.authenticated
+import io.github.slashncode.nothingeats.platform.http.auth.requireRole
 import io.github.slashncode.nothingeats.platform.http.auth.user
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -174,6 +176,29 @@ data class OrderResponse(
     val quoteSource: String,
 )
 
+/** An order as the backoffice sees it: with its customer, the language and the quote. */
+@Serializable
+data class AdminOrderResponse(
+    val userId: String,
+    val language: String,
+    val quotedSeconds: Int,
+    val order: OrderResponse,
+)
+
+@Serializable
+data class AdminOrderPageResponse(
+    val items: List<AdminOrderResponse>,
+    val nextCursor: String?,
+)
+
+@Serializable
+data class AdminOrdersTodayResponse(
+    /** The day in Hamburg. */
+    val day: String,
+    val placed: Int,
+    val byStatus: Map<String, Int>,
+)
+
 @Serializable
 data class OrderPageResponse(
     val items: List<OrderResponse>,
@@ -183,6 +208,7 @@ data class OrderPageResponse(
 /**
  * `/api/ordering/v1`, all for the signed-in customer: cart, quote, checkout with an
  * `Idempotency-Key`, order history and the GDPR export. Names come in `?lang=` or Accept-Language.
+ * `/admin/orders` is the backoffice's read-only view of every customer's orders (role `admin`).
  */
 class OrderingRoutes(
     private val viewCart: ViewCart,
@@ -195,6 +221,7 @@ class OrderingRoutes(
     private val listOrders: ListOrders,
     private val getOrder: GetOrder,
     private val exportOrders: ExportOrders,
+    private val adminOrders: AdminOrders,
 ) : HttpRoutes {
     override fun Route.register() {
         route("/api/ordering/v1") {
@@ -243,6 +270,29 @@ class OrderingRoutes(
                 get("/me/export") {
                     call.response.header(HttpHeaders.ContentDisposition, "attachment; filename=\"nothingeats-orders.json\"")
                     call.respond(exportOrders(call.user.id).map { it.response(call.language()) })
+                }
+            }
+            requireRole("admin") {
+                route("/admin/orders") {
+                    // ?status=&userId=&restaurant=<slug>&cursor=&limit=
+                    get {
+                        val language = call.language()
+                        val query = call.request.queryParameters
+                        val page =
+                            adminOrders.search(
+                                status = query["status"],
+                                userId = query["userId"],
+                                restaurantSlug = query["restaurant"],
+                                cursor = query["cursor"],
+                                limit = query["limit"]?.let { it.toIntOrNull() ?: 0 } ?: DEFAULT_PAGE,
+                            )
+                        call.respond(AdminOrderPageResponse(page.orders.map { it.adminResponse(language) }, page.nextCursor))
+                    }
+                    get("/today") {
+                        val today = adminOrders.today()
+                        call.respond(AdminOrdersTodayResponse(today.day.toString(), today.placed, today.byStatus.mapKeys { it.key.name }))
+                    }
+                    get("/{id}") { call.respond(adminOrders.find(call.parameters["id"].orEmpty()).adminResponse(call.language())) }
                 }
             }
         }
@@ -312,6 +362,8 @@ class OrderingRoutes(
 
     private fun CheckoutQuote.response() =
         QuoteResponse(etaSeconds, simulatedMinutes, distanceMeters, courierShortage, source.name.lowercase())
+
+    private fun Order.adminResponse(language: Language) = AdminOrderResponse(userId, this.language.tag, quotedSeconds, response(language))
 
     private fun Order.response(language: Language) =
         OrderResponse(

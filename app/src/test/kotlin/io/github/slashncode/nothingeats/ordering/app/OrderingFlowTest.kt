@@ -363,6 +363,53 @@ class OrderingFlowTest :
                 json(call("POST", "/quotes", """{"dropOff":{"latitude":53.5636,"longitude":9.9654}}""")).text("source") shouldBe "estimate"
                 call("POST", "/orders", checkout, mapOf("Idempotency-Key" to "checkout-2")).statusCode() shouldBe 201
 
+                // The backoffice: every customer's orders, filters, pages, today's counts; customers are refused.
+                val adminToken = tokens.accessToken(userId = "boss", roles = setOf("admin"))
+
+                fun admin(path: String) =
+                    http.send(
+                        HttpRequest
+                            .newBuilder(URI("$base$path"))
+                            .header("Authorization", "Bearer $adminToken")
+                            .GET()
+                            .build(),
+                        BodyHandlers.ofString(),
+                    )
+
+                call("GET", "/admin/orders").statusCode() shouldBe 403
+                val everything = json(admin("/admin/orders?lang=en")).getValue("items").jsonArray.map { it.jsonObject }
+                everything.map { it.text("userId") } shouldBe listOf("ghost-1", "ghost-1")
+                everything
+                    .last()
+                    .getValue("order")
+                    .jsonObject
+                    .text("id") shouldBe orderId
+                everything.last().text("quotedSeconds") shouldBe "150"
+                json(admin("/admin/orders?status=delivered"))
+                    .getValue("items")
+                    .jsonArray
+                    .single()
+                    .jsonObject
+                    .getValue("order")
+                    .jsonObject
+                    .text("id") shouldBe orderId
+                json(admin("/admin/orders?userId=nobody")).getValue("items").jsonArray.size shouldBe 0
+                admin("/admin/orders?status=LOST").statusCode() shouldBe 422
+                val firstPage = json(admin("/admin/orders?limit=1"))
+                val secondPage = json(admin("/admin/orders?limit=1&cursor=${firstPage.text("nextCursor")}"))
+                secondPage
+                    .getValue("items")
+                    .jsonArray
+                    .single()
+                    .jsonObject
+                    .getValue("order")
+                    .jsonObject
+                    .text("id") shouldBe orderId
+                val today = json(admin("/admin/orders/today"))
+                today.text("placed") shouldBe "2"
+                today.getValue("byStatus").jsonObject.text("DELIVERED") shouldBe "1"
+                json(admin("/admin/orders/$orderId")).text("userId") shouldBe "ghost-1"
+
                 KafkaClients.producer(config.kafka, "test").use { producer ->
                     producer.publish(
                         "identity.user.v1",

@@ -5,7 +5,10 @@ import io.github.slashncode.nothingeats.ordering.domain.MenuDish
 import io.github.slashncode.nothingeats.ordering.domain.MenuRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.Order
 import io.github.slashncode.nothingeats.ordering.domain.OrderStatus
+import java.time.Clock
 import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.Base64
 
 data class OrderPage(
@@ -23,24 +26,79 @@ class ListOrders(
         limit: Int,
     ): OrderPage {
         if (limit !in 1..MAX_LIMIT) throw invalid("limit", "must be between 1 and $MAX_LIMIT")
-        val page = orders.page(userId, cursor?.let(::decode), limit + 1)
-        val more = page.size > limit
-        val shown = page.take(limit)
-        return OrderPage(shown, if (more) encode(shown.last()) else null)
+        return pageOf(limit) { orders.page(userId, cursor?.let(::decodeCursor), it) }
+    }
+}
+
+internal const val MAX_LIMIT = 50
+
+/** One more than asked for tells whether there is a next page. */
+private suspend fun pageOf(
+    limit: Int,
+    load: suspend (Int) -> List<Order>,
+): OrderPage {
+    val page = load(limit + 1)
+    val shown = page.take(limit)
+    return OrderPage(shown, if (page.size > limit) encodeCursor(shown.last()) else null)
+}
+
+private fun encodeCursor(order: Order) =
+    Base64.getUrlEncoder().withoutPadding().encodeToString("${order.placedAt}|${order.id}".toByteArray())
+
+private fun decodeCursor(cursor: String): OrderCursor =
+    try {
+        val (at, id) = String(Base64.getUrlDecoder().decode(cursor)).split('|', limit = 2)
+        OrderCursor(Instant.parse(at), id)
+    } catch (e: Exception) {
+        throw invalid("cursor", "is not a cursor from this API")
     }
 
-    private fun encode(order: Order) = Base64.getUrlEncoder().withoutPadding().encodeToString("${order.placedAt}|${order.id}".toByteArray())
+/** Today's orders in Hamburg, counted by where they are now. */
+data class OrdersToday(
+    val day: LocalDate,
+    val byStatus: Map<OrderStatus, Int>,
+) {
+    val placed: Int get() = byStatus.values.sum()
+}
 
-    private fun decode(cursor: String): OrderCursor =
-        try {
-            val (at, id) = String(Base64.getUrlDecoder().decode(cursor)).split('|', limit = 2)
-            OrderCursor(Instant.parse(at), id)
-        } catch (e: Exception) {
-            throw invalid("cursor", "is not a cursor from this API")
-        }
+/**
+ * The backoffice's view of every customer's orders. Only for role `admin` (the routes check it);
+ * read only: orders change through their delivery, never by hand.
+ */
+class AdminOrders(
+    private val orders: Orders,
+    private val clock: Clock,
+) {
+    suspend fun search(
+        status: String?,
+        userId: String?,
+        restaurantSlug: String?,
+        cursor: String?,
+        limit: Int,
+    ): OrderPage {
+        if (limit !in 1..MAX_LIMIT) throw invalid("limit", "must be between 1 and $MAX_LIMIT")
+        val filter =
+            OrderFilter(
+                status =
+                    status?.takeIf { it.isNotBlank() }?.let { raw ->
+                        OrderStatus.entries.firstOrNull { it.name == raw.uppercase() } ?: throw invalid("status", "is not an order status")
+                    },
+                userId = userId?.takeIf { it.isNotBlank() },
+                restaurantSlug = restaurantSlug?.takeIf { it.isNotBlank() },
+            )
+        return pageOf(limit) { orders.search(filter, cursor?.let(::decodeCursor), it) }
+    }
+
+    suspend fun find(orderId: String): Order = orders.find(orderId) ?: throw orderNotFound()
+
+    suspend fun today(): OrdersToday {
+        val day = LocalDate.now(clock.withZone(HAMBURG))
+        val counts = orders.countByStatus(day.atStartOfDay(HAMBURG).toInstant())
+        return OrdersToday(day, OrderStatus.entries.associateWith { counts[it] ?: 0 })
+    }
 
     private companion object {
-        const val MAX_LIMIT = 50
+        val HAMBURG: ZoneId = ZoneId.of("Europe/Berlin")
     }
 }
 

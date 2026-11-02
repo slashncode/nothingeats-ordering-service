@@ -4,6 +4,7 @@ import io.github.slashncode.nothingeats.ordering.application.Carts
 import io.github.slashncode.nothingeats.ordering.application.DuplicateRequest
 import io.github.slashncode.nothingeats.ordering.application.Menu
 import io.github.slashncode.nothingeats.ordering.application.OrderCursor
+import io.github.slashncode.nothingeats.ordering.application.OrderFilter
 import io.github.slashncode.nothingeats.ordering.application.OrderRequests
 import io.github.slashncode.nothingeats.ordering.application.Orders
 import io.github.slashncode.nothingeats.ordering.application.StoredRequest
@@ -24,12 +25,15 @@ import io.github.slashncode.nothingeats.ordering.domain.QuoteSource
 import io.github.slashncode.nothingeats.ordering.domain.Text
 import io.github.slashncode.nothingeats.platform.persistence.PostgresDatabase
 import io.github.slashncode.nothingeats.platform.persistence.isUniqueViolation
+import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.count
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.greater
+import org.jetbrains.exposed.v1.core.greaterEq
 import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.less
 import org.jetbrains.exposed.v1.core.lessEq
@@ -41,6 +45,7 @@ import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
 import org.jetbrains.exposed.v1.jdbc.insertIgnore
+import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.update
 import org.jetbrains.exposed.v1.jdbc.upsert
@@ -410,6 +415,34 @@ class ExposedOrders(
         }
 
     override suspend fun all(userId: String): List<Order> = db.transaction(readOnly = true) { load { OrdersTable.userId eq userId } }
+
+    override suspend fun search(
+        filter: OrderFilter,
+        cursor: OrderCursor?,
+        limit: Int,
+    ): List<Order> =
+        db.transaction(readOnly = true) {
+            val t = OrdersTable
+            val conditions =
+                listOfNotNull<Op<Boolean>>(
+                    filter.status?.let { t.status eq it.name },
+                    filter.userId?.let { t.userId eq it },
+                    filter.restaurantSlug?.let { t.restaurantSlug eq it },
+                    cursor?.let { (t.placedAt less it.placedAt.utc()) or ((t.placedAt eq it.placedAt.utc()) and (t.id less it.id)) },
+                )
+            load(limit) { conditions.reduceOrNull { a, b -> a and b } ?: Op.TRUE }
+        }
+
+    override suspend fun countByStatus(since: Instant): Map<OrderStatus, Int> =
+        db.transaction(readOnly = true) {
+            val t = OrdersTable
+            val count = t.id.count()
+            t
+                .select(t.status, count)
+                .where { t.placedAt greaterEq since.utc() }
+                .groupBy(t.status)
+                .associate { OrderStatus.valueOf(it[t.status]) to it[count].toInt() }
+        }
 
     override suspend fun updateStatus(order: Order) {
         db.transaction {

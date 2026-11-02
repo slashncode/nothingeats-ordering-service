@@ -84,6 +84,25 @@ class InMemoryOrders : Orders {
     override suspend fun all(userId: String) =
         rows.values.filter { it.userId == userId }.sortedWith(compareByDescending<Order> { it.placedAt }.thenByDescending { it.id })
 
+    override suspend fun search(
+        filter: OrderFilter,
+        cursor: OrderCursor?,
+        limit: Int,
+    ) = rows.values
+        .filter { order ->
+            (filter.status == null || order.status == filter.status) &&
+                (filter.userId == null || order.userId == filter.userId) &&
+                (filter.restaurantSlug == null || order.restaurant.slug == filter.restaurantSlug)
+        }.sortedWith(compareByDescending<Order> { it.placedAt }.thenByDescending { it.id })
+        .filter { cursor == null || it.placedAt < cursor.placedAt || (it.placedAt == cursor.placedAt && it.id < cursor.id) }
+        .take(limit)
+
+    override suspend fun countByStatus(since: Instant) =
+        rows.values
+            .filter { !it.placedAt.isBefore(since) }
+            .groupingBy { it.status }
+            .eachCount()
+
     override suspend fun updateStatus(order: Order) {
         rows[order.id] = order
     }

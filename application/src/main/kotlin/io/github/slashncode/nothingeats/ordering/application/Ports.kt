@@ -6,6 +6,7 @@ import io.github.slashncode.nothingeats.ordering.domain.MenuDeal
 import io.github.slashncode.nothingeats.ordering.domain.MenuDish
 import io.github.slashncode.nothingeats.ordering.domain.MenuRestaurant
 import io.github.slashncode.nothingeats.ordering.domain.Order
+import io.github.slashncode.nothingeats.ordering.domain.OrderStatus
 import java.time.Instant
 
 /**
@@ -49,6 +50,13 @@ data class OrderCursor(
     val id: String,
 )
 
+/** What the backoffice narrows orders down to; null means any. */
+data class OrderFilter(
+    val status: OrderStatus? = null,
+    val userId: String? = null,
+    val restaurantSlug: String? = null,
+)
+
 interface Orders {
     suspend fun insert(order: Order)
 
@@ -62,6 +70,16 @@ interface Orders {
     ): List<Order>
 
     suspend fun all(userId: String): List<Order>
+
+    /** Every customer's orders (the backoffice), newest first, after [cursor]. */
+    suspend fun search(
+        filter: OrderFilter,
+        cursor: OrderCursor?,
+        limit: Int,
+    ): List<Order>
+
+    /** Orders placed since [since], counted by their current status. */
+    suspend fun countByStatus(since: Instant): Map<OrderStatus, Int>
 
     suspend fun updateStatus(order: Order)
 

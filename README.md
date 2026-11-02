@@ -17,6 +17,14 @@ Ordering in [NothingEats](https://github.com/slashncode/nothingeats): the cart, 
 | `GET` | `/orders/{id}` | One order (others' orders are `404`) |
 | `GET` | `/me/export` | Everything held about the user (GDPR) |
 
+Role `admin` (the backoffice), read only:
+
+| Method | Path | What |
+|---|---|---|
+| `GET` | `/admin/orders?status=&userId=&restaurant=&cursor=&limit=` | Every customer's orders, newest first, each with `userId`, `language` and `quotedSeconds` |
+| `GET` | `/admin/orders/today` | Today's orders (Hamburg time) by current status |
+| `GET` | `/admin/orders/{id}` | One order |
+
 Names in `?lang=de|en` or Accept-Language. PostHog server events (only with analytics consent, i.e. when the browser sent its distinct id): `dish_added_to_cart`, `coupon_applied`, `order_placed` (`money_not_spent_cents`, `calories_avoided`, discount, deal items, quote source).
 
 ## How it works
