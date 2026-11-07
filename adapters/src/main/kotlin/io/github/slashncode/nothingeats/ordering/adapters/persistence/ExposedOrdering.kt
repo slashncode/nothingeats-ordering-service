@@ -49,6 +49,7 @@ import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.update
 import org.jetbrains.exposed.v1.jdbc.upsert
+import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
@@ -171,6 +172,7 @@ class ExposedTransactions(
 
 class ExposedMenu(
     private val db: PostgresDatabase,
+    private val clock: Clock = Clock.systemUTC(),
 ) : Menu {
     override suspend fun upsertRestaurant(
         restaurant: MenuRestaurant,
@@ -223,7 +225,7 @@ class ExposedMenu(
                 it[startsAt] = deal.startsAt.utc()
                 it[endsAt] = deal.endsAt.utc()
             }
-            MenuDealsTable.deleteWhere { MenuDealsTable.endsAt less Instant.now().minus(DEAL_RETENTION).utc() }
+            MenuDealsTable.deleteWhere { MenuDealsTable.endsAt less clock.instant().minus(DEAL_RETENTION).utc() }
         }
     }
 

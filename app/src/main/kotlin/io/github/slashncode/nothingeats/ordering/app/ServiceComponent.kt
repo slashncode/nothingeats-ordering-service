@@ -49,6 +49,8 @@ import io.github.slashncode.nothingeats.platform.http.HttpExtension
 import io.github.slashncode.nothingeats.platform.http.HttpRoutes
 import io.github.slashncode.nothingeats.platform.http.HttpServer
 import io.github.slashncode.nothingeats.platform.http.auth.JwtAuth
+import io.github.slashncode.nothingeats.platform.kafka.ConsumerLag
+import io.github.slashncode.nothingeats.platform.kafka.ConsumerLagWatch
 import io.github.slashncode.nothingeats.platform.kafka.EventConsumer
 import io.github.slashncode.nothingeats.platform.kafka.EventConsumerConfig
 import io.github.slashncode.nothingeats.platform.kafka.EventHandler
@@ -193,6 +195,12 @@ abstract class ServiceComponent(
     @IntoSet
     @Provides
     fun eventConsumerLifecycle(consumer: EventConsumer): LifecycleComponent = consumer
+
+    // Reports to error tracking when the group's events wait longer than 10 minutes.
+    @IntoSet
+    @Provides
+    fun consumerLagWatch(analytics: ProductAnalytics): LifecycleComponent =
+        ConsumerLagWatch("ordering-service", ConsumerLag(config.kafka), analytics)
 
     @IntoSet
     @Provides

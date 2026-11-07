@@ -22,7 +22,9 @@ import io.github.slashncode.nothingeats.platform.testing.PostgresTestDatabases
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import java.time.Clock
 import java.time.Instant
+import java.time.ZoneOffset
 
 class ExposedOrderingTest :
     FunSpec({
@@ -40,7 +42,7 @@ class ExposedOrderingTest :
         val noon = Instant.parse("2026-11-02T11:00:00Z")
 
         test("a deal applies to its dish while it runs; a repeated deal event changes nothing") {
-            val menu = ExposedMenu(database)
+            val menu = ExposedMenu(database, Clock.fixed(noon, ZoneOffset.UTC))
             menu.upsertDish(margherita, 1)
             menu.upsertDish(tiramisu, 2)
             val deal = MenuDeal("deal-1", margherita.id, 760, 30, noon, noon.plusSeconds(1800))
